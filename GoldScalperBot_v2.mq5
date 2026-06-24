@@ -40,7 +40,7 @@ input int TrendStopLoss = 40;          // SL in pips
 input int TrendCandles = 20;           // Look back for trend
 
 input group "=== SCALING & PARTIAL EXITS ==="
-input int ScalingDistance = 5;         // Pips between entries (5 pips = Entry 1, 10 pips = Entry 2, 15 = Entry 3)
+input int ScalingDistance = 5;         // Pips between entries
 input int PartialTP1 = 5;              // Close 50% of Position 1 at X pips
 input int PartialTP2 = 10;             // Close 50% of Position 2 at X pips
 input bool UseTrailingStop = true;     // Trailing stop on Position 3
@@ -54,18 +54,15 @@ input bool EnableTrading = true;       // Master on/off switch
 //--- Global Variables
 double swingHigh, swingLow;
 double fibLevel;
-string panel_text = "";
 double dailyOpenBalance = 0;
 double dailyLossLimit = 0;
 bool dailyLimitHit = false;
-datetime lastDayCheck = 0;
 
-// Scaling tracking
 struct PositionData {
    int ticket;
    double entryPrice;
    double quantity;
-   int positionNumber;  // 1, 2, or 3
+   int positionNumber;
    bool partialClosed;
 };
 
@@ -77,13 +74,11 @@ int activePositions = 0;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   Print("====== Gold Scalper Bot v2.0 Initialized ======");
+   Print("====== Gold Scalper Bot v2.0 Initialized ======" );
    Print("Mode: ", GetModeName(TradingMode));
    Print("Base Lot Size: ", LotSize);
    Print("Daily Loss Limit: ", DailyLossLimitPercent, "%");
    Print("Scaling Distance: ", ScalingDistance, " pips");
-   Print("Magic Number: ", MagicNumber);
-   Print("==============================================");
    
    dailyOpenBalance = AccountBalance();
    dailyLossLimit = dailyOpenBalance * (DailyLossLimitPercent / 100.0);
@@ -98,32 +93,22 @@ void OnTick()
 {
    if (!EnableTrading) return;
    
-   // Check daily loss limit
    CheckDailyLossLimit();
    
    if (dailyLimitHit) {
       if (ShowControlPanel) UpdateControlPanel();
-      return; // Don't trade if daily limit hit
+      return;
    }
    
-   // Update control panel
    if (ShowControlPanel) {
       UpdateControlPanel();
    }
    
-   // Calculate swing highs/lows
    CalculateSwingLevels();
-   
-   // Calculate Fib levels based on mode
    UpdateFibLevel();
-   
-   // Check for trading signals
    CheckTradeSignals();
-   
-   // Manage open positions (scaling & partial exits)
    ManagePositions();
    
-   // Manage trailing stops
    if (UseTrailingStop) {
       ManageTrailingStops();
    }
@@ -134,24 +119,18 @@ void OnTick()
 //+------------------------------------------------------------------+
 void CheckDailyLossLimit()
 {
-   datetime currentTime = TimeCurrent();
-   datetime startOfDay = currentTime - (currentTime % 86400) + TimeGMTOffset() * 3600;
-   
-   // Reset daily limit at new day
-   if (currentTime - lastDayCheck >= 86400) {
+   if (Hour() == 0 && Minute() < 1 && dailyLimitHit) {
       dailyOpenBalance = AccountBalance();
       dailyLimitHit = false;
-      lastDayCheck = currentTime;
-      Print("Daily limit reset. Starting balance: ", dailyOpenBalance);
+      Print("Daily limit reset. Balance: $", dailyOpenBalance);
    }
    
    double currentBalance = AccountBalance();
    double dailyLoss = dailyOpenBalance - currentBalance;
    
-   if (dailyLoss >= dailyLossLimit) {
+   if (dailyLoss >= dailyLossLimit && dailyLoss > 0) {
       dailyLimitHit = true;
-      Print("DAILY LOSS LIMIT HIT! Loss: $", dailyLoss, " / Limit: $", dailyLossLimit);
-      Print("Trading paused for the day.");
+      Print("DAILY LOSS LIMIT HIT! Loss: $", dailyLoss);
    }
 }
 
@@ -160,13 +139,12 @@ void CheckDailyLossLimit()
 //+------------------------------------------------------------------+
 void CalculateSwingLevels()
 {
-   int lookback = 10;
-   swingHigh = High[iHighest(NULL, 0, MODE_HIGH, lookback, 1)];
-   swingLow = Low[iLowest(NULL, 0, MODE_LOW, lookback, 1)];
+   swingHigh = High[iHighest(NULL, 0, MODE_HIGH, 10, 1)];
+   swingLow = Low[iLowest(NULL, 0, MODE_LOW, 10, 1)];
 }
 
 //+------------------------------------------------------------------+
-//| Update Fib level based on trading mode                           |
+//| Update Fib level based on mode                                   |
 //+------------------------------------------------------------------+
 void UpdateFibLevel()
 {
@@ -184,26 +162,21 @@ void UpdateFibLevel()
 }
 
 //+------------------------------------------------------------------+
-//| Check for trade signals & initiate first position                |
+//| Check for trade signals                                          |
 //+------------------------------------------------------------------+
 void CheckTradeSignals()
 {
+   if (CountActivePositions() > 0) return;
+   
    double bid = SymbolInfoDouble(Symbol(), SYMBOL_BID);
    double ask = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
    
-   // Check if we already have an active trade
-   if (CountActivePositions() > 0) {
-      return; // Already in a trade, scaling will handle additional entries
-   }
-   
-   // Check for breakout above swing high (BUY)
    if (Close[0] > swingHigh && Close[1] <= swingHigh) {
-      OpenFirstPosition(true, ask, bid); // true = BUY
+      OpenFirstPosition(true, ask, bid);
    }
    
-   // Check for breakout below swing low (SELL)
    if (Close[0] < swingLow && Close[1] >= swingLow) {
-      OpenFirstPosition(false, ask, bid); // false = SELL
+      OpenFirstPosition(false, ask, bid);
    }
 }
 
@@ -216,7 +189,6 @@ void OpenFirstPosition(bool isBuy, double ask, double bid)
    int orderType = isBuy ? OP_BUY : OP_SELL;
    double entryPrice = isBuy ? ask : bid;
    
-   // Get TP/SL based on mode
    switch(TradingMode) {
       case SCALP_MODE:
          tp = isBuy ? ask + (ScalpTakeProfit * Point()) : bid - (ScalpTakeProfit * Point());
@@ -232,22 +204,13 @@ void OpenFirstPosition(bool isBuy, double ask, double bid)
          break;
    }
    
-   // Calculate lot size
-   if (UseAutoSizing) {
-      lots = CalculateLotSize(RiskPercent, sl);
-   } else {
-      lots = LotSize;
-   }
+   lots = UseAutoSizing ? CalculateLotSize(RiskPercent, sl) : LotSize;
    
-   // Open order
    int ticket = OrderSend(Symbol(), orderType, lots, entryPrice, 10, sl, tp,
                         "GoldScalper P1", MagicNumber, 0, isBuy ? clrGreen : clrRed);
    
    if (ticket > 0) {
-      Print("=== POSITION 1 OPENED ===");
-      Print("Ticket: ", ticket, " | Type: ", (isBuy ? "BUY" : "SELL"), " | Lots: ", lots);
-      Print("Entry: ", entryPrice, " | TP: ", tp, " | SL: ", sl);
-      
+      Print("POSITION 1 OPENED - Ticket: ", ticket);
       positions[0].ticket = ticket;
       positions[0].entryPrice = entryPrice;
       positions[0].quantity = lots;
@@ -274,36 +237,28 @@ void ManagePositions()
       double pipsProfit = isBuy ? (currentPrice - positions[i].entryPrice) / Point() : 
                                    (positions[i].entryPrice - currentPrice) / Point();
       
-      // Position 1: Check for partial exit at PartialTP1
+      // Partial exits
       if (positions[i].positionNumber == 1 && pipsProfit >= PartialTP1 && !positions[i].partialClosed) {
          double closePrice = isBuy ? bid : ask;
-         double halfQuantity = positions[i].quantity / 2.0;
-         
-         if (OrderClose(positions[i].ticket, halfQuantity, closePrice, 10)) {
+         if (OrderClose(positions[i].ticket, positions[i].quantity / 2.0, closePrice, 10)) {
             positions[i].partialClosed = true;
-            Print("=== POSITION 1 PARTIAL CLOSE ===");
-            Print("Closed 50% at ", pipsProfit, " pips profit");
+            Print("Position 1 partial close at ", pipsProfit, " pips");
          }
       }
       
-      // Position 2: Check for partial exit at PartialTP2
       if (positions[i].positionNumber == 2 && pipsProfit >= PartialTP2 && !positions[i].partialClosed) {
          double closePrice = isBuy ? bid : ask;
-         double halfQuantity = positions[i].quantity / 2.0;
-         
-         if (OrderClose(positions[i].ticket, halfQuantity, closePrice, 10)) {
+         if (OrderClose(positions[i].ticket, positions[i].quantity / 2.0, closePrice, 10)) {
             positions[i].partialClosed = true;
-            Print("=== POSITION 2 PARTIAL CLOSE ===");
-            Print("Closed 50% at ", pipsProfit, " pips profit");
+            Print("Position 2 partial close at ", pipsProfit, " pips");
          }
       }
       
-      // Check for scaling: Open Position 2 if Position 1 has X pips profit
+      // Scaling
       if (activePositions == 1 && pipsProfit >= ScalingDistance) {
          OpenScalingPosition(2, isBuy, ask, bid);
       }
       
-      // Check for scaling: Open Position 3 if Position 2 has X pips profit
       if (activePositions == 2 && positions[1].entryPrice != 0) {
          double p2Profit = isBuy ? (currentPrice - positions[1].entryPrice) / Point() :
                                    (positions[1].entryPrice - currentPrice) / Point();
@@ -315,17 +270,16 @@ void ManagePositions()
 }
 
 //+------------------------------------------------------------------+
-//| Open Scaling Position (Position 2 or 3)                          |
+//| Open Scaling Position                                            |
 //+------------------------------------------------------------------+
 void OpenScalingPosition(int positionNum, bool isBuy, double ask, double bid)
 {
-   if (activePositions >= 3) return; // Already have 3 positions
+   if (activePositions >= 3) return;
    
    double tp, sl, lots;
    int orderType = isBuy ? OP_BUY : OP_SELL;
    double entryPrice = isBuy ? ask : bid;
    
-   // Get TP/SL based on mode
    switch(TradingMode) {
       case SCALP_MODE:
          tp = isBuy ? ask + (ScalpTakeProfit * Point()) : bid - (ScalpTakeProfit * Point());
@@ -341,20 +295,13 @@ void OpenScalingPosition(int positionNum, bool isBuy, double ask, double bid)
          break;
    }
    
-   if (UseAutoSizing) {
-      lots = CalculateLotSize(RiskPercent, sl);
-   } else {
-      lots = LotSize;
-   }
+   lots = UseAutoSizing ? CalculateLotSize(RiskPercent, sl) : LotSize;
    
    int ticket = OrderSend(Symbol(), orderType, lots, entryPrice, 10, sl, tp,
-                        "GoldScalper P" + IntegerToString(positionNum), MagicNumber, 0, isBuy ? clrBlue : clrOrange);
+                        "GoldScalper P" + IntegerToString(positionNum), MagicNumber, 0, clrBlue);
    
    if (ticket > 0) {
-      Print("=== POSITION ", positionNum, " OPENED ===");
-      Print("Ticket: ", ticket, " | Lots: ", lots);
-      Print("Entry: ", entryPrice, " | TP: ", tp, " | SL: ", sl);
-      
+      Print("POSITION ", positionNum, " OPENED - Ticket: ", ticket);
       positions[positionNum - 1].ticket = ticket;
       positions[positionNum - 1].entryPrice = entryPrice;
       positions[positionNum - 1].quantity = lots;
@@ -365,12 +312,11 @@ void OpenScalingPosition(int positionNum, bool isBuy, double ask, double bid)
 }
 
 //+------------------------------------------------------------------+
-//| Manage Trailing Stops for Position 3                             |
+//| Manage Trailing Stops                                            |
 //+------------------------------------------------------------------+
 void ManageTrailingStops()
 {
-   if (activePositions < 3) return; // Only trail Position 3
-   
+   if (activePositions < 3) return;
    if (!OrderSelect(positions[2].ticket, SELECT_BY_TICKET)) return;
    
    int orderType = OrderType();
@@ -383,7 +329,6 @@ void ManageTrailingStops()
    
    double currentSL = OrderStopLoss();
    
-   // Only move SL up (for buys) or down (for sells) if more profitable
    if (isBuy && newSL > currentSL) {
       OrderModify(positions[2].ticket, OrderOpenPrice(), newSL, OrderTakeProfit(), 0);
    } else if (!isBuy && newSL < currentSL) {
@@ -392,7 +337,7 @@ void ManageTrailingStops()
 }
 
 //+------------------------------------------------------------------+
-//| Calculate lot size based on risk                                 |
+//| Calculate lot size                                               |
 //+------------------------------------------------------------------+
 double CalculateLotSize(double risk_percent, double stop_loss_price)
 {
@@ -438,60 +383,44 @@ string GetModeName(TRADING_MODE mode)
 {
    switch(mode) {
       case SCALP_MODE:
-         return "SCALP MODE (5M - 2-5 pips)";
+         return "SCALP (5M)";
       case SWING_MODE:
-         return "SWING MODE (15M - 10-20 pips)";
+         return "SWING (15M)";
       case TREND_FOLLOW_MODE:
-         return "TREND FOLLOW MODE (20+ pips)";
+         return "TREND";
       default:
          return "UNKNOWN";
    }
 }
 
 //+------------------------------------------------------------------+
-//| Calculate Daily P&L                                              |
-//+------------------------------------------------------------------+
-double CalculateDailyPnL()
-{
-   return dailyOpenBalance - AccountBalance();
-}
-
-//+------------------------------------------------------------------+
-//| Update Control Panel on Chart                                    |
+//| Update Control Panel                                             |
 //+------------------------------------------------------------------+
 void UpdateControlPanel()
 {
-   double dailyPnL = CalculateDailyPnL();
+   double dailyPnL = dailyOpenBalance - AccountBalance();
    double dailyPnLPercent = (dailyPnL / dailyOpenBalance) * 100;
-   double remainingDailyLimit = dailyLossLimit - MathAbs(dailyPnL);
    
-   string panel_info = "";
-   panel_info += "\n╔════════ GOLD SCALPER BOT v2.0 ════════╗";
-   panel_info += "\n║ Mode: " + GetModeName(TradingMode);
-   panel_info += "\n║ Status: " + (EnableTrading ? "ACTIVE" : "INACTIVE");
-   panel_info += "\n║ Positions: " + IntegerToString(CountActivePositions()) + "/3";
-   panel_info += "\n║";
-   panel_info += "\n║ Account: $" + DoubleToString(AccountBalance(), 2);
-   panel_info += "\n║ Daily P&L: $" + DoubleToString(dailyPnL, 2) + " (" + DoubleToString(dailyPnLPercent, 1) + "%)";
-   panel_info += "\n║ Daily Limit: -$" + DoubleToString(dailyLossLimit, 2);
-   panel_info += "\n║ Remaining: $" + DoubleToString(remainingDailyLimit, 2);
+   string panel = "";
+   panel += "\n╔════ GOLD SCALPER v2.0 ════╗";
+   panel += "\n║ Mode: " + GetModeName(TradingMode);
+   panel += "\n║ Positions: " + IntegerToString(CountActivePositions()) + "/3";
+   panel += "\n║ Account: $" + DoubleToString(AccountBalance(), 2);
+   panel += "\n║ Daily P&L: $" + DoubleToString(dailyPnL, 2);
+   panel += "\n║ Limit: -$" + DoubleToString(dailyLossLimit, 2);
    
    if (dailyLimitHit) {
-      panel_info += "\n║";
-      panel_info += "\n║ ⚠️  DAILY LIMIT HIT - NO TRADING ⚠️";
+      panel += "\n║ ⚠️ DAILY LIMIT HIT";
    }
    
-   panel_info += "\n║";
-   panel_info += "\n║ Swing High: " + DoubleToString(swingHigh, 2);
-   panel_info += "\n║ Swing Low: " + DoubleToString(swingLow, 2);
-   panel_info += "\n║ Price: " + DoubleToString(Close[0], 2);
-   panel_info += "\n╚═══════════════════════════════════════╝";
+   panel += "\n║ Price: " + DoubleToString(Close[0], 2);
+   panel += "\n╚═══════════════════════════╝";
    
-   Comment(panel_info);
+   Comment(panel);
 }
 
 //+------------------------------------------------------------------+
-//| Expert deinitialization function                                 |
+//| Expert deinit                                                    |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
